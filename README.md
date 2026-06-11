@@ -4,7 +4,9 @@ SakanaEnv is a JAX-native multi-agent swarm environment for testing decentralize
 
 The canonical API is functional JAX: `reset`, `observe`, and `step` operate on immutable PyTree state. A small Gymnasium adapter is included for compatibility with existing RL tooling, but the core environment is not forced into Gymnasium.
 
-![boids baseline](assets/boids.gif)
+<video src="assets/sakanaenv-new-full-720p.m4v" controls muted loop playsinline width="720"></video>
+
+[Open the 3D demo video](assets/sakanaenv-new-full-720p.m4v)
 
 ## Quickstart
 
