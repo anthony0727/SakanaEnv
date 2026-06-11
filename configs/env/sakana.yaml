@@ -1,0 +1,13 @@
+defaults:
+  - default
+  - _self_
+
+id: SakanaEnv-v0
+num_envs: 1
+action_repeat: 1
+max_episode_steps: 500
+capture_video: False
+
+wrapper:
+  _target_: gymnasium.make
+  id: ${env.id}

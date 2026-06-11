@@ -1,0 +1,506 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>SakanaEnv</title>
+<link rel="icon" href="data:,">
+<style>
+  html, body { margin: 0; height: 100%; background: #c8e8f0; overflow: hidden; font-family: system-ui, sans-serif; }
+  #ui { position: absolute; top: 12px; left: 12px; font-size: 12px; color: #333; pointer-events: none; z-index: 10; }
+  #ui b { font-size: 14px; }
+  #tools { position: absolute; bottom: 16px; left: 12px; z-index: 10; pointer-events: auto; display: flex; gap: 6px; align-items: end; }
+  #tools button { padding: 8px 14px; font-size: 12px; font-weight: bold; border: 2px solid #4488aa; border-radius: 6px; cursor: pointer; background: #fff; color: #333; }
+  #tools button.active { background: #4488aa; color: #fff; }
+  #tools .hint { font-size: 10px; color: #888; }
+</style>
+</head>
+<body>
+<div id="ui"><b>SakanaEnv</b><br><span id="info">loading…</span>
+<div id="scores" style="margin-top:6px; font-size:13px; line-height:1.6;"></div>
+</div>
+<div id="tools">
+  <button id="btn-normal" class="active" onclick="switchMode('normal')">Normal</button>
+  <button id="btn-whirlpool" onclick="switchMode('whirlpool')">Whirlpool (渦潮)</button>
+  <button id="btn-current" onclick="switchMode('current')">Current (海流)</button>
+</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.161.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.161.0/examples/jsm/"
+} }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { RGBELoader } from 'three/addons/loaders/RGBELoader.js';
+
+// ---- scene ----
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0xc8e8f0);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(innerWidth, innerHeight);
+renderer.setPixelRatio(devicePixelRatio);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+document.body.appendChild(renderer.domElement);
+
+// ---- lights (bright) ----
+scene.add(new THREE.AmbientLight(0xffffff, 1.2));
+const sun = new THREE.DirectionalLight(0xffffff, 2.5);
+sun.position.set(2, 5, 3);
+scene.add(sun);
+const fill = new THREE.DirectionalLight(0xccddff, 1.2);
+fill.position.set(-2, 3, -1);
+scene.add(fill);
+
+// ---- HDRI for PBR reflections (makes metallic stripes shiny, NOT used as background) ----
+new RGBELoader().load('assets/city_night.hdr', (tex) => {
+  tex.mapping = THREE.EquirectangularReflectionMapping;
+  scene.environment = tex;  // reflections only — background stays aqua
+});
+
+// ---- helpers ----
+const loader = new GLTFLoader();
+const loadGLB = (p) => new Promise((ok, no) => loader.load(p, g => ok(g.scene), null, no));
+const loadJSON = (p) => fetch(p).then(r => r.json());
+const info = document.getElementById('info');
+
+// ---- extract ONE fish from the Meshy trio (top-third by Y centroid) ----
+function extractOneFish(gltfScene) {
+  let src = null;
+  gltfScene.traverse(n => { if (n.isMesh && !src) src = n; });
+  if (!src || !src.geometry.index) return gltfScene;
+
+  const geom = src.geometry, pos = geom.getAttribute('position'), idx = geom.index;
+  const nF = idx.count / 3;
+  const yc = new Float32Array(nF);
+  for (let f = 0; f < nF; f++) {
+    yc[f] = (pos.getY(idx.getX(f*3)) + pos.getY(idx.getX(f*3+1)) + pos.getY(idx.getX(f*3+2))) / 3;
+  }
+  const sorted = Array.from(yc).sort((a,b) => a-b);
+  const thresh = sorted[Math.floor(nF * 0.66)];
+
+  const ni = [];
+  for (let f = 0; f < nF; f++) {
+    if (yc[f] > thresh) ni.push(idx.getX(f*3), idx.getX(f*3+1), idx.getX(f*3+2));
+  }
+  const ng = geom.clone();
+  ng.setIndex(ni);
+  ng.computeBoundingSphere();
+
+  const g = new THREE.Group();
+  g.add(new THREE.Mesh(ng, src.material.clone()));
+  return g;
+}
+
+function makeFish(gltfScene, tint) {
+  const single = extractOneFish(gltfScene);
+  const group = new THREE.Group();
+  single.traverse(n => {
+    if (!n.isMesh) return;
+    const mat = n.material ? n.material.clone() : new THREE.MeshStandardMaterial({ color: 0xff7a3a });
+    if (tint) mat.color.multiply(new THREE.Color(tint));
+    // subtle glow so fish pop against background
+    mat.emissive = new THREE.Color(0x442200);
+    mat.emissiveIntensity = 0.15;
+    const m = new THREE.Mesh(n.geometry.clone(), mat);
+    if (n.matrixWorld) m.applyMatrix4(n.matrixWorld);
+    group.add(m);
+  });
+  return group;
+}
+
+// ---- sakura: height-based gradient (brown trunk → bright pink canopy) ----
+function makeSakura(gltfScene, scale = 1.5) {
+  let srcMesh = null;
+  gltfScene.traverse(n => { if (n.isMesh && !srcMesh) srcMesh = n; });
+  if (!srcMesh) return new THREE.Group();
+
+  const geom = srcMesh.geometry.clone();
+  const pos = geom.getAttribute('position');
+
+  // find Y extent
+  let minY = Infinity, maxY = -Infinity;
+  for (let i = 0; i < pos.count; i++) {
+    const y = pos.getY(i);
+    if (y < minY) minY = y;
+    if (y > maxY) maxY = y;
+  }
+
+  // vertex colors: brown trunk → pink canopy by Y position
+  const colors = new Float32Array(pos.count * 3);
+  const brown = [0.30, 0.17, 0.08];
+  const pink = [0.88, 0.70, 0.76];
+  for (let i = 0; i < pos.count; i++) {
+    const yNorm = (pos.getY(i) - minY) / (maxY - minY);
+    // smoothstep: 0-20% = brown, 20-40% = transition, 40-100% = pink
+    const t = Math.min(1, Math.max(0, (yNorm - 0.2) / 0.2));
+    colors[i*3]   = brown[0] * (1-t) + pink[0] * t;
+    colors[i*3+1] = brown[1] * (1-t) + pink[1] * t;
+    colors[i*3+2] = brown[2] * (1-t) + pink[2] * t;
+  }
+  geom.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+  const mat = new THREE.MeshBasicMaterial({ vertexColors: true });
+  const mesh = new THREE.Mesh(geom, mat);
+
+  const group = new THREE.Group();
+  group.add(mesh);
+  // shift up so base sits at Y=0
+  group.position.y = -minY;
+  const wrapper = new THREE.Group();
+  wrapper.add(group);
+  wrapper.scale.setScalar(scale);
+  return wrapper;
+}
+
+// ---- main ----
+const ALGO = ['PPO', 'DQN', 'AB-MCTS'];
+const TINTS = [null, null, null];
+const LABEL_COLORS = ['#3388ff', '#ff2266', '#ff8833'];  // PPO=blue, DQN=pink, AB-MCTS=orange(sakana)
+
+let currentRollout = null;
+let currentMode = 'normal';
+let fi = 0;
+let whirlpoolGroup = null;
+let currentGroup = null;
+const rolloutCache = {};
+
+window.switchMode = async function(mode) {
+  currentMode = mode;
+  document.getElementById('btn-normal').className = mode === 'normal' ? 'active' : '';
+  document.getElementById('btn-whirlpool').className = mode === 'whirlpool' ? 'active' : '';
+  document.getElementById('btn-current').className = mode === 'current' ? 'active' : '';
+  const files = {
+    normal: 'rollouts/normal_treequest.json',
+    whirlpool: 'rollouts/whirlpool_treequest.json',
+    current: 'rollouts/current_treequest.json',
+  };
+  if (!rolloutCache[mode]) rolloutCache[mode] = await loadJSON(files[mode]);
+  currentRollout = rolloutCache[mode];
+  fi = 0;
+  if (whirlpoolGroup) whirlpoolGroup.visible = (mode === 'whirlpool');
+  if (currentGroup) currentGroup.visible = (mode === 'current');
+};
+
+Promise.all([
+  loadGLB('rollouts/fish_default.glb'),
+  loadGLB('rollouts/onigiri.glb').catch(() => null),
+  loadJSON('rollouts/normal_treequest.json'),
+  loadGLB('rollouts/sakura.glb').catch(() => null),
+]).then(([fishScene, onigiriScene, rollout, sakuraScene]) => {
+  currentRollout = rollout;
+  const W = rollout.cfg.world_size;
+
+  // camera
+  const camera = new THREE.PerspectiveCamera(40, innerWidth/innerHeight, 0.1, 500);
+  camera.position.set(W/2 + 18, 10, W/2 + 18);
+  camera.lookAt(W/2, 0, W/2);
+  const controls = new OrbitControls(camera, renderer.domElement);
+  controls.target.set(W/2, 0, W/2);
+  controls.enableDamping = true;
+  controls.dampingFactor = 0.08;
+
+  // floor — arena with visible boundary
+  const floor = new THREE.Mesh(
+    new THREE.PlaneGeometry(W*6, W*6),
+    new THREE.MeshBasicMaterial({ color: 0xc8e8f0 })
+  );
+  floor.rotation.x = -Math.PI/2;
+  floor.position.set(W/2, -0.5, W/2);
+  scene.add(floor);
+
+  // arena floor (slightly different color to show the play area)
+  const arena = new THREE.Mesh(
+    new THREE.PlaneGeometry(W, W),
+    new THREE.MeshBasicMaterial({ color: 0xd8f0f6 })
+  );
+  arena.rotation.x = -Math.PI/2;
+  arena.position.set(W/2, -0.4, W/2);
+  scene.add(arena);
+
+  // visible wall boundary — white lines around the arena edge
+  const wallPts = [
+    new THREE.Vector3(0, 0, 0),
+    new THREE.Vector3(W, 0, 0),
+    new THREE.Vector3(W, 0, W),
+    new THREE.Vector3(0, 0, W),
+  ];
+  const wallGeom = new THREE.BufferGeometry().setFromPoints(wallPts);
+  const wallLine = new THREE.LineLoop(wallGeom, new THREE.LineBasicMaterial({ color: 0x4488aa, linewidth: 2 }));
+  wallLine.position.y = 0.05;
+  scene.add(wallLine);
+
+  // corner posts so walls are visible from any angle
+  for (const [cx, cz] of [[0,0],[W,0],[W,W],[0,W]]) {
+    const post = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.3, 0.3, 3, 8),
+      new THREE.MeshPhongMaterial({ color: 0x4488aa })
+    );
+    post.position.set(cx, 1.5, cz);
+    scene.add(post);
+  }
+
+  // sakura trees along walls (outside arena, won't block fish view)
+  if (sakuraScene) {
+    const treeTemplate = makeSakura(sakuraScene, 5.0);
+    const offset = 8;  // further outside the wall
+    const spots = [
+      // back wall (z = -offset)
+      [W*0.25, -offset], [W*0.5, -offset], [W*0.75, -offset],
+      // front wall (z = W+offset)
+      [W*0.25, W+offset], [W*0.5, W+offset], [W*0.75, W+offset],
+      // left wall (x = -offset)
+      [-offset, W*0.25], [-offset, W*0.75],
+      // right wall (x = W+offset)
+      [W+offset, W*0.25], [W+offset, W*0.75],
+    ];
+    for (const [sx, sz] of spots) {
+      const t = treeTemplate.clone(true);
+      t.position.set(sx, 0, sz);
+      t.rotation.y = Math.random() * Math.PI * 2;
+      scene.add(t);
+    }
+  }
+
+  // fish (3 algorithm-colored, from single Meshy fish)
+  const SCALE = 2.5;
+  const templates = TINTS.map(t => { const g = makeFish(fishScene, t); g.scale.setScalar(SCALE); return g; });
+  const fishInst = [];
+  const nFish = Math.min(rollout.cfg.n_fish, 3);
+
+  for (let i = 0; i < nFish; i++) {
+    const wrapper = new THREE.Group();
+    const mesh = templates[i % templates.length].clone(true);
+    wrapper.add(mesh);
+
+    // label above head
+    const c = document.createElement('canvas');
+    c.width = 512; c.height = 128;
+    const ctx = c.getContext('2d');
+    ctx.clearRect(0, 0, 512, 128);
+    ctx.fillStyle = LABEL_COLORS[i];
+    ctx.font = 'bold 80px system-ui, sans-serif';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.strokeStyle = '#000'; ctx.lineWidth = 8;
+    ctx.strokeText(ALGO[i], 256, 64);
+    ctx.fillText(ALGO[i], 256, 64);
+    const label = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(c), transparent: true }));
+    label.scale.set(5, 1.2, 1);
+    label.position.set(0.5, 2.5, 0);
+    wrapper.add(label);
+
+    scene.add(wrapper);
+    fishInst.push(wrapper);
+  }
+
+  // food — single onigiri extracted from the GLB (skip plate + other 2)
+  let onigiriTemplate = new THREE.Group();
+  if (onigiriScene) {
+    // Collect only the FIRST onigiri (meshes 1-6: rice+seaweed, skip mesh 0 = wood plate)
+    const kept = [];
+    let meshIdx = 0;
+    onigiriScene.traverse(n => {
+      if (!n.isMesh) return;
+      const matName = n.material?.name || '';
+      if (matName === 'wood') { meshIdx++; return; }
+      if (kept.length >= 6) { meshIdx++; return; }
+      const mat = n.material ? n.material.clone() : new THREE.MeshPhongMaterial();
+      // fix seaweed color → dark nori black-green
+      if (matName === 'seaweed') {
+        mat.color = new THREE.Color(0x0a1a0a);
+        mat.map = null;  // override any wrong texture
+      }
+      // fix rice color → clean white
+      if (matName === 'rice') {
+        mat.color = new THREE.Color(0xf8f6f0);
+      }
+      const m = new THREE.Mesh(n.geometry.clone(), mat);
+      m.applyMatrix4(n.matrixWorld);
+      kept.push(m);
+      meshIdx++;
+    });
+    kept.forEach(m => onigiriTemplate.add(m));
+
+    // center + scale + rotate upright
+    const box = new THREE.Box3().setFromObject(onigiriTemplate);
+    const center = new THREE.Vector3();
+    box.getCenter(center);
+    onigiriTemplate.position.sub(center);
+    // rotate so the flat bottom faces down (Y-) and triangle points up (Y+)
+    onigiriTemplate.rotation.x = -Math.PI / 2;  // lay flat → stand up
+    const size = new THREE.Vector3();
+    box.getSize(size);
+    const s = 1.2 / Math.max(size.x, size.y, size.z);
+    onigiriTemplate.scale.setScalar(s);
+  } else {
+    // fallback
+    const g = new THREE.SphereGeometry(0.6, 3, 8);
+    g.scale(1, 1.1, 0.5);
+    onigiriTemplate.add(new THREE.Mesh(g, new THREE.MeshPhongMaterial({ color: 0xf8f4e8 })));
+  }
+  const foodInst = [];
+  for (let i = 0; i < rollout.cfg.n_food; i++) {
+    const m = onigiriTemplate.clone(true);
+    scene.add(m);
+    foodInst.push(m);
+  }
+
+  // whirlpool visual — thin cylinder + spiral particles
+  whirlpoolGroup = new THREE.Group();
+  const wpRadius = 8;
+  const wpHeight = 1.5;
+  const cyl = new THREE.Mesh(
+    new THREE.CylinderGeometry(wpRadius, wpRadius, wpHeight, 48, 1, true),
+    new THREE.MeshBasicMaterial({ color: 0x2266aa, transparent: true, opacity: 0.08, side: THREE.DoubleSide })
+  );
+  cyl.position.y = wpHeight / 2;
+  whirlpoolGroup.add(cyl);
+  // floor ring
+  const ring = new THREE.Mesh(
+    new THREE.RingGeometry(wpRadius - 0.3, wpRadius + 0.3, 64),
+    new THREE.MeshBasicMaterial({ color: 0x3388cc, transparent: true, opacity: 0.25, side: THREE.DoubleSide })
+  );
+  ring.rotation.x = -Math.PI / 2; ring.position.y = 0.1;
+  whirlpoolGroup.add(ring);
+  // spiral particles
+  const wpCount = 200;
+  const wpGeo = new THREE.BufferGeometry();
+  const wpPos = new Float32Array(wpCount * 3);
+  const wpPhase = []; const wpR = [];
+  for (let i = 0; i < wpCount; i++) {
+    const r = Math.random() * wpRadius;
+    const a = Math.random() * Math.PI * 2;
+    wpPos[i*3] = Math.cos(a) * r;
+    wpPos[i*3+1] = Math.random() * wpHeight;
+    wpPos[i*3+2] = Math.sin(a) * r;
+    wpPhase.push(a); wpR.push(r);
+  }
+  wpGeo.setAttribute('position', new THREE.BufferAttribute(wpPos, 3));
+  const wpParticles = new THREE.Points(wpGeo, new THREE.PointsMaterial({
+    color: 0x66bbee, size: 0.35, transparent: true, opacity: 0.5
+  }));
+  whirlpoolGroup.add(wpParticles);
+  whirlpoolGroup._p = wpParticles; whirlpoolGroup._phase = wpPhase; whirlpoolGroup._r = wpR;
+  whirlpoolGroup.visible = false;
+  scene.add(whirlpoolGroup);
+
+  // current visual — large flow arrows across the whole arena
+  currentGroup = new THREE.Group();
+  const arrowMat = new THREE.MeshBasicMaterial({ color: 0x2288aa, transparent: true, opacity: 0.35 });
+  for (let row = 0; row < 5; row++) {
+    for (let col = 0; col < 6; col++) {
+      const cone = new THREE.Mesh(new THREE.ConeGeometry(0.6, 2.0, 6), arrowMat);
+      cone.rotation.z = -Math.PI / 2; // point along +X
+      const cx = col * (W / 5) - W * 0.1;
+      const cz = row * (W / 4) - W * 0.1;
+      cone.position.set(cx, 0.5, cz);
+      currentGroup.add(cone);
+    }
+  }
+  currentGroup.visible = false;
+  scene.add(currentGroup);
+
+  // position whirlpool at center, current across arena
+  whirlpoolGroup.position.set(W/2, 0, W/2);
+  currentGroup.position.set(W/2, 0, W/2);
+
+  // scores
+  const scores = [0, 0, 0];
+  const scoresEl = document.getElementById('scores');
+  let prevFood = null;
+
+  function resetScores() { scores[0] = scores[1] = scores[2] = 0; prevFood = null; }
+
+  function updateScoresUI() {
+    scoresEl.innerHTML = ALGO.map((a, i) =>
+      `<span style="color:${LABEL_COLORS[i]}; font-weight:bold">${a}</span>: ${scores[i]}`
+    ).join('<br>');
+  }
+
+  // animation
+  const FPS = 24;
+  let last = performance.now();
+
+  function tick(now) {
+    requestAnimationFrame(tick);
+    if (now - last >= 1000/FPS && currentRollout) {
+      const frames = currentRollout.frames;
+      if (fi === 0) resetScores();
+      const f = frames[fi];
+      for (let i = 0; i < nFish; i++) {
+        if (!f.fish[i]) continue;
+        const [x, y, vx, vy, alive] = f.fish[i];
+        fishInst[i].position.set(x, 0, y);
+        fishInst[i].rotation.y = -Math.atan2(vy, vx);
+        fishInst[i].visible = alive;
+      }
+      const nFood = currentRollout.cfg.n_food;
+      // detect food eaten: was active, now inactive → nearest fish scores
+      if (prevFood) {
+        for (let j = 0; j < nFood; j++) {
+          if (!f.food[j] || !prevFood[j]) continue;
+          if (prevFood[j][2] && !f.food[j][2]) {
+            // food j was eaten — find nearest fish
+            const [fx, fy] = prevFood[j];
+            let bestD = Infinity, bestI = 0;
+            for (let i = 0; i < nFish; i++) {
+              if (!f.fish[i]) continue;
+              const dx = f.fish[i][0] - fx, dy = f.fish[i][1] - fy;
+              const d = dx*dx + dy*dy;
+              if (d < bestD) { bestD = d; bestI = i; }
+            }
+            scores[bestI]++;
+          }
+        }
+      }
+      prevFood = f.food.map(fd => fd ? [...fd] : null);
+
+      for (let i = 0; i < foodInst.length; i++) {
+        if (i >= nFood || !f.food[i]) { foodInst[i].visible = false; continue; }
+        const [fx, fy, active] = f.food[i];
+        foodInst[i].position.set(fx, 0.5, fy);
+        foodInst[i].visible = active;
+      }
+      info.textContent = `step ${fi+1}/${frames.length} · ${FPS}fps`;
+      updateScoresUI();
+      fi = (fi + 1) % frames.length;
+      last = now;
+    }
+    // animate whirlpool particles
+    if (whirlpoolGroup.visible && whirlpoolGroup._p) {
+      const p = whirlpoolGroup._p;
+      const pos = p.geometry.getAttribute('position');
+      const t = performance.now() * 0.004;
+      for (let i = 0; i < pos.count; i++) {
+        const a = whirlpoolGroup._phase[i] + t * (1 + whirlpoolGroup._r[i] * 0.1);
+        const r = whirlpoolGroup._r[i];
+        pos.setXYZ(i, Math.cos(a) * r, pos.getY(i), Math.sin(a) * r);
+      }
+      pos.needsUpdate = true;
+    }
+    // animate current arrows — pulse forward
+    if (currentGroup.visible) {
+      const t = performance.now() * 0.002;
+      currentGroup.children.forEach((c, i) => {
+        const col = i % 6, row = Math.floor(i / 6);
+        c.position.x = col * (W/5) - W*0.1 + Math.sin(t + col * 0.8 + row * 0.3) * 2;
+        c.material.opacity = 0.2 + Math.sin(t + i * 0.4) * 0.15;
+      });
+    }
+    controls.update();
+    renderer.render(scene, camera);
+  }
+  requestAnimationFrame(tick);
+
+  addEventListener('resize', () => {
+    camera.aspect = innerWidth/innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(innerWidth, innerHeight);
+  });
+}).catch(e => { info.textContent = 'error: ' + e.message; console.error(e); });
+</script>
+</body>
+</html>

@@ -1,0 +1,52 @@
+[project]
+name = "sakana-env"
+version = "0.1.0"
+description = "JAX-native multi-agent swarm environment with TreeQuest-style decision-time planning demos."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [
+    { name = "Anthony W. Jung" },
+]
+dependencies = [
+    "jax>=0.4.30",
+    "matplotlib>=3.8",
+    "numpy>=1.26",
+    "pillow>=10.0",
+    "pyglet>=2.1.14",
+    "trimesh>=4.11.5",
+]
+
+[project.optional-dependencies]
+gym = [
+    "gymnasium>=0.29",
+]
+planner = [
+    "tqdm>=4.66",
+    "treequest[all]>=0.3.2",
+]
+eval = [
+    "stable-baselines3>=2.3",
+    "tqdm>=4.66",
+    "treequest[all]>=0.3.2",
+]
+sb3 = [
+    "gymnasium>=0.29",
+    "stable-baselines3>=2.3",
+]
+video = [
+    "playwright>=1.50",
+]
+dev = [
+    "pytest>=8.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["sakana_env"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

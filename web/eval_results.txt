@@ -1,0 +1,29 @@
+SakanaEnv Competitive Eval — PPO vs DQN vs AB-MCTS
+20 episodes × 10000 steps per mode
+
+=======================================================
+NORMAL: 20 episodes × 10000 steps
+=======================================================
+  PPO (trained)                 :  711.8 ± 38.6
+  DQN (trained)                 :  214.8 ± 24.9
+  AB-MCTS (zero-shot)           :  927.0 ± 44.1
+=======================================================
+
+=======================================================
+WHIRLPOOL: 20 episodes × 10000 steps
+=======================================================
+  PPO (trained)                 :  498.8 ± 91.7
+  DQN (trained)                 :  116.9 ± 26.1
+  AB-MCTS (zero-shot)           :  719.9 ± 125.8
+=======================================================
+
+=======================================================
+CURRENT: 20 episodes × 10000 steps
+=======================================================
+  PPO (trained)                 :   -4.6 ± 5.1
+  DQN (trained)                 :    6.3 ± 9.0
+  AB-MCTS (zero-shot)           :  589.4 ± 31.8
+=======================================================
+
+Key finding: AB-MCTS (zero-shot, test-time search) wins all 3 modes.
+Current perturbation completely breaks PPO (-4.6) while AB-MCTS adapts (589.4).

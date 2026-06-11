@@ -1,0 +1,42 @@
+# @package _global_
+defaults:
+  - override /algo: dreamer_v3_XS
+  - override /env: sakana
+  - _self_
+
+algo:
+  total_steps: 200000
+  per_rank_batch_size: 16
+  replay_ratio: 1
+  learning_starts: 1024
+  per_rank_sequence_length: 32
+  cnn_keys:
+    encoder: []
+    decoder: []
+  mlp_keys:
+    encoder: [obs]
+    decoder: [obs]
+  world_model:
+    encoder:
+      mlp_layers: 2
+      dense_units: 256
+    recurrent_model:
+      recurrent_state_size: 256
+    transition_model:
+      hidden_size: 256
+    representation_model:
+      hidden_size: 256
+
+env:
+  id: SakanaEnv-v0
+  num_envs: 1
+  capture_video: False
+
+buffer:
+  size: 100000
+
+seed: 42
+metric:
+  log_every: 5000
+checkpoint:
+  every: 50000
